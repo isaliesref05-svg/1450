@@ -1,0 +1,22 @@
+{
+  "name": "1450 Party",
+  "short_name": "1450 Party",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0a0e1a",
+  "theme_color": "#0a0e1a",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230a0e1a'/><circle cx='50' cy='50' r='34' fill='%23ffc83d' stroke='%239a5b00' stroke-width='6'/><circle cx='50' cy='50' r='22' fill='%23ffdd66'/><path d='M50 38l4 8 8 4-8 4-4 8-4-8-8-4 8-4z' fill='%239a5b00'/></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230a0e1a'/><circle cx='50' cy='50' r='34' fill='%23ffc83d' stroke='%239a5b00' stroke-width='6'/><circle cx='50' cy='50' r='22' fill='%23ffdd66'/><path d='M50 38l4 8 8 4-8 4-4 8-4-8-8-4 8-4z' fill='%239a5b00'/></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}
