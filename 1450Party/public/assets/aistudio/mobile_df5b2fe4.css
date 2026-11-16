@@ -1,0 +1,150 @@
+/* 1450 Party — telefon (yatay) üçün əlavə üslublar. index.html-dəki əsas üslubların üstündən yazır. */
+
+html, body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+button, .game-card, .weapon-chip, .player-count-btn, .round-btn { touch-action: manipulation; -webkit-user-select: none; user-select: none; }
+
+/* ───────── Oyun içi toxunma düymələri ───────── */
+.mpad-host { --b: clamp(46px, 16vh, 66px); }
+.mpad { position: absolute; pointer-events: none; color: var(--pc, #5ff); }
+.mpad-btn {
+  pointer-events: auto; touch-action: none; -webkit-user-select: none; user-select: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  width: var(--b); height: var(--b); padding: 0; border-radius: 50%;
+  color: inherit; font: 800 9px/1 system-ui, sans-serif; letter-spacing: .4px;
+  background: color-mix(in srgb, var(--pc, #5ff) 16%, rgba(8, 12, 28, .55));
+  border: 2px solid color-mix(in srgb, var(--pc, #5ff) 55%, transparent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .35), inset 0 0 14px color-mix(in srgb, var(--pc, #5ff) 14%, transparent);
+  backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+  transition: transform .06s, background .06s;
+}
+.mpad-btn svg { width: 44%; height: 44%; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.mpad-btn span { opacity: .9; }
+.mpad-btn.on { transform: scale(.92); background: color-mix(in srgb, var(--pc, #5ff) 55%, rgba(8, 12, 28, .5)); color: #fff; }
+.mpad-atk  { background: color-mix(in srgb, var(--pc, #5ff) 28%, rgba(8, 12, 28, .55)); }
+.mpad-tag {
+  position: absolute; top: -17px; left: 0; right: 0; text-align: center; pointer-events: none;
+  font: 900 11px/1 system-ui, sans-serif; letter-spacing: 1px; text-shadow: 0 1px 4px #000;
+}
+
+.mpad-host.mpad-many { --b: clamp(36px, 12vh, 48px); }
+.mpad-many .mpad-btn span { display: none; }
+.mpad-many .mpad { opacity: .88; }
+
+/* 2-4 yerli oyunçu: hər kəs üçün bir baş barmaqla çatan 2×2 blok */
+.mpad-bl, .mpad-br, .mpad-tl, .mpad-tr {
+  display: grid; grid-template-columns: repeat(2, var(--b)); grid-template-rows: repeat(2, var(--b)); gap: 8px;
+}
+.mpad-bl { left: max(10px, env(safe-area-inset-left)); bottom: max(14px, env(safe-area-inset-bottom)); }
+.mpad-br { right: max(10px, env(safe-area-inset-right)); bottom: max(14px, env(safe-area-inset-bottom)); }
+.mpad-tl { left: max(10px, env(safe-area-inset-left)); top: max(64px, env(safe-area-inset-top)); }
+.mpad-tr { right: max(10px, env(safe-area-inset-right)); top: max(64px, env(safe-area-inset-top)); }
+.mpad-bl .mpad-jump, .mpad-br .mpad-jump, .mpad-tl .mpad-jump, .mpad-tr .mpad-jump { grid-area: 1 / 1; }
+.mpad-bl .mpad-atk,  .mpad-br .mpad-atk,  .mpad-tl .mpad-atk,  .mpad-tr .mpad-atk  { grid-area: 1 / 2; }
+.mpad-bl .mpad-left, .mpad-br .mpad-left, .mpad-tl .mpad-left, .mpad-tr .mpad-left { grid-area: 2 / 1; }
+.mpad-bl .mpad-right,.mpad-br .mpad-right,.mpad-tl .mpad-right,.mpad-tr .mpad-right{ grid-area: 2 / 2; }
+
+/* 1 yerli oyunçu (onlayn): sol — hərəkət, sağ — tullan/hücum */
+.mpad-solo { inset: 0; }
+.mpad-side { position: absolute; bottom: max(18px, env(safe-area-inset-bottom)); display: flex; align-items: flex-end; gap: 14px; }
+.mpad-side-l { left: max(16px, env(safe-area-inset-left)); }
+.mpad-side-r { right: max(16px, env(safe-area-inset-right)); }
+.mpad-solo .mpad-btn { width: calc(var(--b) * 1.2); height: calc(var(--b) * 1.2); }
+.mpad-solo .mpad-atk { width: calc(var(--b) * 1.45); height: calc(var(--b) * 1.45); }
+.mpad-solo .mpad-jump { margin-bottom: calc(var(--b) * .45); }
+
+/* ───────── Yatay telefon: menyular ───────── */
+@media (orientation: landscape) and (max-height: 560px) {
+  .screen { padding: 8px 14px; }
+  #offlineMenu, #onlineMenu, #onlineLobbyChoice, #roomCreate, #roomJoin, #roomLobby, #minigameMenu { padding-top: 54px; }
+  .glass-panel { padding: 12px 16px; max-height: calc(100vh - 66px); max-height: calc(100dvh - 66px); overflow-y: auto; border-radius: 16px; }
+  .btn { padding: 10px 18px; font-size: .9rem; min-height: 44px; }
+  .btn-sm { padding: 8px 12px; font-size: .78rem; min-height: 38px; }
+  .section-title { font-size: 1rem; margin-bottom: 6px; }
+  .back-btn { top: 8px; left: 8px; width: 40px; height: 40px; }
+  .party-topbar { top: 6px; right: 8px; }
+
+  /* Əsas oflayn menyu: solda loqo, sağda seçimlər */
+  #offlineMenu.active { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(280px, 1.4fr); grid-template-rows: auto auto; align-content: center; justify-content: center; column-gap: 24px; row-gap: 6px; }
+  #offlineMenu .logo-lockup { grid-column: 1; grid-row: 1; margin: 0; }
+  #offlineMenu .mode-switch-row { grid-column: 1; grid-row: 2; margin: 0; align-self: start; }
+  #offlineMenu .glass-panel { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+  #offlineMenu .mb-24, #offlineMenu .mb-20 { margin-bottom: 8px; }
+  #offlineMenu .subtitle { margin-bottom: 8px; font-size: .8rem; }
+  #offlineMenu .player-count-btn { padding: 8px 6px; min-height: 52px; }
+  #offlineMenu .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  #offlineMenu .btn-group .btn { width: 100%; }
+
+  /* Mini oyun menyusu: hamısı bir ekranda, Başla/Təsadüfi altda */
+  #minigameMenu .subtitle { display: none; }
+  #minigameMenu .or-divider { display: none; }
+  #minigameMenu .card-grid.mb-20 { margin-bottom: 8px; }
+  #minigameMenu .game-card { padding: 7px 4px; }
+  #minigameMenu .game-card .card-icon svg { width: 24px; height: 24px; }
+  #minigameMenu .glass-panel > .btn, #minigameMenu .glass-panel .mt-12 .btn { width: 100%; margin: 0; min-height: 42px; }
+  #minigameMenu .mt-12 { margin-top: 6px; }
+
+  /* Mini oyun menyusu (əvvəlki qaydalar) */
+  #minigameMenu .glass-panel { max-width: 760px; }
+  #minigameMenu .card-grid { grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  #minigameMenu .game-card { padding: 10px 6px; }
+  #minigameMenu .game-card .card-icon { font-size: 1.6rem; margin-bottom: 2px; }
+  #minigameMenu .game-card .card-desc { display: none; }
+
+  /* ───────── VS qurulumu: iki sütun ───────── */
+  #vsSetup { padding: 52px 12px 10px; }
+  #vsSetup .vs-panel {
+    max-width: 880px !important; width: 100%; height: calc(100vh - 62px); height: calc(100dvh - 62px); max-height: none; overflow: hidden;
+    display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; gap: 8px 14px; padding: 10px 12px;
+  }
+  #vsSetup .vs-col { min-height: 0; display: flex; flex-direction: column; }
+  #vsSetup .vs-col-maps { grid-column: 1; grid-row: 1 / span 2; }
+  #vsSetup .vs-col-opts { grid-column: 2; grid-row: 1; overflow-y: auto; padding-right: 2px; -webkit-overflow-scrolling: touch; }
+  #vsSetup .vs-footer { grid-column: 2; grid-row: 2; display: flex; gap: 8px; align-items: stretch; }
+  #vsSetup .vs-footer .vs-style-btn { flex: 1 1 40%; font-size: .7rem; line-height: 1.15; text-align: center; }
+  #vsSetup .vs-footer #btnStartVs { flex: 1 1 60%; width: auto; min-height: 50px; font-size: 1.05rem; }
+  #vsSetup .vs-title { font-size: .95rem; margin: 0 0 6px; text-align: left; justify-content: flex-start; }
+
+  /* Xəritə kartları: yığcam, daxili sürüşdürmə */
+  #vsSetup #mapGrid { flex: 1; min-height: 0; overflow-y: auto; grid-template-columns: repeat(3, 1fr); gap: 7px; align-content: start; padding: 2px 3px 2px 2px; -webkit-overflow-scrolling: touch; }
+  #vsSetup #mapGrid .game-card { padding: 8px 4px; border-radius: 12px; min-height: 66px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+  #vsSetup #mapGrid .game-card:hover { transform: none; }
+  #vsSetup #mapGrid .card-icon { font-size: 1.5rem; margin: 0 0 2px; line-height: 1.1; }
+  #vsSetup #mapGrid .card-icon svg { width: 26px; height: 26px; }
+  #vsSetup #mapGrid .card-title { font-size: .72rem; line-height: 1.15; }
+  #vsSetup #mapGrid .card-desc { display: none; }
+  #vsSetup #mapGrid .game-card.selected { border-color: #3b82f6; background: rgba(59,130,246,.18); }
+
+  /* Silahlar: hər oyunçu üçün bir sətir, yana sürüşdürmə */
+  #vsSetup .btn-row { display: flex; gap: 6px; margin-bottom: 6px; }
+  #vsSetup .btn-row .btn { flex: 1; min-height: 40px; font-size: .8rem; padding: 6px 8px; }
+  #vsSetup .weapon-selector { display: flex; flex-direction: column; gap: 6px; }
+  #vsSetup .weapon-player-row { display: flex; align-items: center; gap: 6px; }
+  #vsSetup .weapon-player-label { flex: 0 0 auto; min-width: 30px; text-align: center; padding: 8px 6px; border-radius: 8px; font-weight: 800; font-size: .75rem; }
+  #vsSetup .weapon-choices { flex: 1; min-width: 0; display: flex !important; flex-wrap: nowrap !important; overflow-x: auto; gap: 6px; padding: 2px 2px 4px; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  #vsSetup .weapon-choices::-webkit-scrollbar { display: none; }
+  #vsSetup .weapon-chip { flex: 0 0 auto !important; width: 62px; min-height: 56px; padding: 5px 2px; font-size: .62rem; scroll-snap-align: start; }
+  #vsSetup .weapon-chip .weapon-icon { font-size: 1.15rem; }
+  #vsSetup .weapon-chip .weapon-icon svg { width: 22px; height: 22px; }
+
+  /* Mağaza */
+  #shopScreen { padding-top: 52px; }
+  .shop-colors .shop-color, #shopColors button { min-width: 30px; min-height: 30px; }
+
+  /* Oyun ekranı: HUD yığcam */
+  .game-hud { padding: 4px 8px; }
+  .pause-btn, .game-hud .icon-btn { width: 40px; height: 40px; }
+}
+
+/* Çox alçaq ekranlar (iPhone SE, kiçik Android) */
+@media (orientation: landscape) and (max-height: 380px) {
+  #offlineMenu .logo-num { font-size: 2.3rem; }
+  #offlineMenu .logo-word { font-size: 1.1rem; }
+  #vsSetup #mapGrid .game-card { min-height: 58px; }
+  .mpad-host { --b: clamp(42px, 15vh, 56px); }
+}
+
+/* Geniş toxunma hədəfləri hər yerdə */
+@media (pointer: coarse) {
+  .back-btn, .icon-btn { min-width: 40px; min-height: 40px; }
+  .player-count-btn, .round-btn { min-height: 44px; }
+}
