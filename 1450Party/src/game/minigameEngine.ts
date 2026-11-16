@@ -1,0 +1,1531 @@
+import { PartyAudio } from './audio';
+import { PartyEconomy } from './economy';
+import { roundRectPath } from './maps';
+import {
+  clearReleasedActions,
+  inputPlayers,
+  MinigameId,
+  PLAYER_COLORS,
+  PLAYER_NAMES,
+  pollKeyboard,
+  resetInputs,
+} from './types';
+
+export interface MiniPlayer {
+  index: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  hp: number;
+  radius: number;
+  angle: number;
+  color: string;
+  alive: boolean;
+  score: number;
+  roundStart: number;
+  isAttacking: boolean;
+  attackTimer: number;
+  dashCooldown: number;
+  coins: number;
+  raceX: number;
+  invincible: number;
+  onGround: boolean;
+  jumpsLeft: number;
+  jh: boolean;
+  kingTicks: number;
+  throwCd: number;
+  snowCd: number;
+  trail: { x: number; y: number; life: number }[];
+}
+
+interface MiniParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  maxLife: number;
+  color: string;
+  radius: number;
+}
+
+interface FloatingPopup {
+  x: number;
+  y: number;
+  vy: number;
+  text: string;
+  color: string;
+  life: number;
+}
+
+interface MiniProjectile {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  owner: number;
+  life: number;
+  snow: boolean;
+}
+
+interface CoinItem {
+  x: number;
+  y: number;
+  radius: number;
+  life: number;
+  diamond: boolean;
+}
+
+interface FallingMeteor {
+  x: number;
+  y: number;
+  vy: number;
+  radius: number;
+  color: string;
+}
+
+interface RaceObstacle {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+interface MiniBall {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  radius: number;
+  lastKicker: number;
+  holder: number;
+  fuse: number;
+  noPick: number;
+}
+
+export interface MiniSerializedState {
+  mini: MinigameId;
+  gs: 'playing' | 'roundEnd' | 'matchEnd';
+  cr: number;
+  gt: number;
+  gtm: number;
+  cd: number | null;
+  pl: Partial<MiniPlayer>[];
+  pr: MiniProjectile[];
+  ball: MiniBall | null;
+  coins: CoinItem[];
+  fo: FallingMeteor[];
+  ro: number;
+  ob: RaceObstacle[];
+  rf: number;
+}
+
+export interface MiniCallbacks {
+  onHudUpdate: (values: (number | string)[], count: number, round: number, maxRounds: number) => void;
+  onMatchEnd: (scores: number[], winnerIndices: number[]) => void;
+  onSendNet?: () => void;
+}
+
+export class MinigameEngine {
+  on = false;
+  paused = false;
+  netRole: 'host' | 'guest' | null = null;
+  gameState: 'playing' | 'roundEnd' | 'matchEnd' = 'playing';
+  currentMinigame: MinigameId = 'sumo';
+  currentRound = 1;
+  maxRounds = 3;
+  playerCount = 2;
+
+  private canvas: HTMLCanvasElement | null = null;
+  private ctx: CanvasRenderingContext2D | null = null;
+  private callbacks: MiniCallbacks | null = null;
+  private raf = 0;
+  private last = 0;
+  private acc = 0;
+  private roundTimerHandle: ReturnType<typeof setTimeout> | null = null;
+  private cw = 960;
+  private ch = 540;
+
+  private players: MiniPlayer[] = [];
+  private particles: MiniParticle[] = [];
+  private popups: FloatingPopup[] = [];
+  private projectiles: MiniProjectile[] = [];
+  private ball: MiniBall | null = null;
+  private coins: CoinItem[] = [];
+  private fallingObjects: FallingMeteor[] = [];
+  private raceOffset = 0;
+  private raceObstacles: RaceObstacle[] = [];
+  private raceFinishX = 0;
+  private coinSpawnTimer = 0;
+  private dodgeSpawnTimer = 0;
+  private dodgeSpeed = 2.6;
+  private gameTimer = 0;
+  private gameTimerMax = 0;
+  private countdownTimer = 0;
+  private countdownActive = false;
+  private shakeMag = 0;
+  private shakeDur = 0;
+  private shakeX = 0;
+  private shakeY = 0;
+  private hudTick = 0;
+
+  start(
+    canvas: HTMLCanvasElement,
+    minigame: MinigameId,
+    pCount: number,
+    rounds: number,
+    netRole: 'host' | 'guest' | null,
+    callbacks: MiniCallbacks
+  ) {
+    this.stop();
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.cw = canvas.width || canvas.clientWidth || 960;
+    this.ch = canvas.height || canvas.clientHeight || 540;
+    this.currentMinigame = minigame;
+    this.playerCount = pCount || 2;
+    this.maxRounds = rounds || 3;
+    this.currentRound = 1;
+    this.netRole = netRole;
+    this.callbacks = callbacks;
+    this.paused = false;
+
+    PartyEconomy.beginMatch();
+    this.spawnPlayers();
+    this.initMinigame();
+    this.gameState = 'playing';
+    this.countdownActive = true;
+    this.countdownTimer = 150;
+    this.emitHud();
+
+    this.on = true;
+    this.last = 0;
+    this.acc = 0;
+    this.raf = requestAnimationFrame(this.loop);
+  }
+
+  stop() {
+    this.on = false;
+    if (this.raf) cancelAnimationFrame(this.raf);
+    this.raf = 0;
+    if (this.roundTimerHandle) {
+      clearTimeout(this.roundTimerHandle);
+      this.roundTimerHandle = null;
+    }
+  }
+
+  restart() {
+    if (this.roundTimerHandle) {
+      clearTimeout(this.roundTimerHandle);
+      this.roundTimerHandle = null;
+    }
+    PartyEconomy.beginMatch();
+    this.currentRound = 1;
+    this.players.forEach((p) => {
+      p.score = 0;
+      p.roundStart = 0;
+    });
+    this.startRound();
+  }
+
+  setPaused(p: boolean) {
+    this.paused = p;
+    if (p) resetInputs();
+  }
+
+  serialize(): MiniSerializedState {
+    return {
+      mini: this.currentMinigame,
+      gs: this.gameState,
+      cr: this.currentRound,
+      gt: this.gameTimer,
+      gtm: this.gameTimerMax,
+      cd: this.countdownActive ? this.countdownTimer : null,
+      pl: this.players.map((p) => ({
+        x: p.x, y: p.y, vx: p.vx, vy: p.vy, hp: p.hp, alive: p.alive,
+        angle: p.angle, score: p.score, coins: p.coins, raceX: p.raceX,
+        isAttacking: p.isAttacking, invincible: p.invincible,
+      })),
+      pr: this.projectiles,
+      ball: this.ball,
+      coins: this.coins,
+      fo: this.fallingObjects,
+      ro: this.raceOffset,
+      ob: this.raceObstacles,
+      rf: this.raceFinishX,
+    };
+  }
+
+  apply(d: MiniSerializedState) {
+    if (!d || !this.players.length) return;
+    this.currentMinigame = d.mini;
+    d.pl.forEach((st, i) => {
+      if (this.players[i]) Object.assign(this.players[i], st);
+    });
+    this.projectiles = d.pr;
+    this.ball = d.ball;
+    this.coins = d.coins;
+    this.fallingObjects = d.fo;
+    this.raceOffset = d.ro;
+    this.raceObstacles = d.ob;
+    this.raceFinishX = d.rf;
+    this.gameTimer = d.gt;
+    this.gameTimerMax = d.gtm;
+    this.currentRound = d.cr;
+    this.countdownActive = d.cd !== null;
+    if (d.cd !== null) this.countdownTimer = d.cd;
+    this.emitHud();
+    if (d.gs === 'matchEnd' && this.gameState !== 'matchEnd') {
+      this.gameState = 'matchEnd';
+      this.triggerMatchEnd();
+    } else if (d.gs !== 'matchEnd') {
+      this.gameState = d.gs;
+    }
+  }
+
+  private emitHud() {
+    const vals = this.players.map((p) => (this.currentMinigame === 'coins' ? p.coins : p.score));
+    this.callbacks?.onHudUpdate(vals, this.playerCount, this.currentRound, this.maxRounds);
+  }
+
+  private triggerMatchEnd() {
+    const scores = this.players.map((p) => p.score);
+    const maxS = Math.max(...scores, 0);
+    const winners = this.players.filter((p) => p.score === maxS).map((p) => p.index);
+    this.callbacks?.onMatchEnd(scores, winners);
+  }
+
+  private spawnPlayers() {
+    const prevScores = this.players.map((p) => p.score);
+    this.players = [];
+    const cx = this.cw / 2;
+    const cy = this.ch / 2;
+    const spawnDist = Math.min(this.cw, this.ch) * 0.23;
+
+    for (let i = 0; i < this.playerCount; i++) {
+      const angle = (Math.PI * 2 * i) / this.playerCount - Math.PI / 2;
+      const sc = prevScores[i] || 0;
+      this.players.push({
+        index: i,
+        x: cx + Math.cos(angle) * spawnDist,
+        y: cy + Math.sin(angle) * spawnDist,
+        vx: 0,
+        vy: 0,
+        hp: 100,
+        radius: 18,
+        angle: Math.atan2(cy - (cy + Math.sin(angle) * spawnDist), cx - (cx + Math.cos(angle) * spawnDist)),
+        color: PLAYER_COLORS[i],
+        alive: true,
+        score: sc,
+        roundStart: sc,
+        isAttacking: false,
+        attackTimer: 0,
+        dashCooldown: 0,
+        coins: 0,
+        raceX: 0,
+        invincible: 0,
+        onGround: true,
+        jumpsLeft: 2,
+        jh: false,
+        kingTicks: 0,
+        throwCd: 0,
+        snowCd: 0,
+        trail: [],
+      });
+    }
+  }
+
+  private initMinigame() {
+    this.projectiles = [];
+    this.particles = [];
+    this.popups = [];
+    this.coins = [];
+    this.fallingObjects = [];
+    this.raceObstacles = [];
+    this.ball = null;
+    this.coinSpawnTimer = 0;
+    this.dodgeSpawnTimer = 0;
+    this.dodgeSpeed = 2.6;
+    this.raceOffset = 0;
+
+    switch (this.currentMinigame) {
+      case 'sumo':
+        this.players.forEach((p) => { p.hp = 999; });
+        break;
+      case 'futbol':
+        this.ball = { x: this.cw / 2, y: this.ch / 2, vx: 0, vy: 0, radius: 13, lastKicker: -1, holder: -1, fuse: 0, noPick: 0 };
+        this.gameTimer = 0;
+        if (this.playerCount >= 2) {
+          this.players[0].x = this.cw * 0.22; this.players[0].y = this.ch / 2;
+          this.players[1].x = this.cw * 0.78; this.players[1].y = this.ch / 2;
+        }
+        if (this.playerCount >= 3) {
+          this.players[2].x = this.cw * 0.28; this.players[2].y = this.ch * 0.32;
+        }
+        if (this.playerCount >= 4) {
+          this.players[3].x = this.cw * 0.72; this.players[3].y = this.ch * 0.32;
+        }
+        break;
+      case 'coins':
+        this.gameTimer = 30 * 60;
+        this.gameTimerMax = this.gameTimer;
+        this.players.forEach((p) => { p.coins = 0; });
+        break;
+      case 'dodge':
+        this.players.forEach((p) => {
+          p.x = this.cw / 2 + (p.index - (this.playerCount - 1) / 2) * 70;
+          p.y = this.ch - 44;
+          p.hp = 100;
+          p.onGround = true;
+        });
+        break;
+      case 'race':
+        this.raceFinishX = Math.max(2400, this.cw * 2.8);
+        this.raceOffset = 0;
+        for (let ox = this.cw * 0.48; ox < this.raceFinishX - 180; ox += 170 + Math.random() * 190) {
+          this.raceObstacles.push({
+            x: ox,
+            y: this.ch - 44 - Math.random() * 44,
+            w: 28 + Math.random() * 24,
+            h: 44 + Math.random() * 44,
+          });
+        }
+        this.players.forEach((p) => {
+          p.raceX = 60;
+          p.x = 60;
+          p.y = this.ch - 48;
+          p.onGround = true;
+          p.jumpsLeft = 2;
+        });
+        break;
+      case 'king':
+        this.gameTimer = 45 * 60;
+        this.gameTimerMax = this.gameTimer;
+        this.players.forEach((p) => { p.hp = 999; p.kingTicks = 0; });
+        break;
+      case 'bomb':
+        this.players.forEach((p) => { p.hp = 100; p.throwCd = 0; });
+        this.ball = { x: this.cw / 2, y: this.ch / 2, vx: 0, vy: 0, radius: 13, lastKicker: -1, holder: -1, fuse: 6 * 60, noPick: 0 };
+        break;
+      case 'snow':
+        this.gameTimer = 40 * 60;
+        this.gameTimerMax = this.gameTimer;
+        this.players.forEach((p) => { p.hp = 100; p.snowCd = 0; });
+        break;
+    }
+  }
+
+  private startRound() {
+    resetInputs();
+    this.gameState = 'playing';
+    this.countdownActive = true;
+    this.countdownTimer = 150;
+    this.spawnPlayers();
+    this.initMinigame();
+    this.emitHud();
+  }
+
+  private endRound() {
+    if (this.gameState !== 'playing') return;
+    this.gameState = 'roundEnd';
+    this.emitHud();
+    this.roundTimerHandle = setTimeout(() => {
+      if (!this.on) return;
+      if (this.currentRound >= this.maxRounds) {
+        this.gameState = 'matchEnd';
+        this.triggerMatchEnd();
+      } else {
+        this.currentRound++;
+        this.startRound();
+      }
+    }, 1850);
+  }
+
+  private spawnParticle(x: number, y: number, color: string, count: number, speed: number, life = 35) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = (0.3 + Math.random() * 0.7) * speed;
+      this.particles.push({
+        x, y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        life,
+        maxLife: life,
+        color,
+        radius: 2 + Math.random() * 3.5,
+      });
+    }
+  }
+
+  private addPopup(x: number, y: number, text: string, color: string) {
+    this.popups.push({ x, y, vy: -1.1, text, color, life: 45 });
+  }
+
+  private triggerShake(mag: number, dur: number) {
+    this.shakeMag = Math.max(this.shakeMag, mag);
+    this.shakeDur = Math.max(this.shakeDur, dur);
+  }
+
+  private killPlayer(p: MiniPlayer) {
+    if (!p.alive) return;
+    p.alive = false;
+    this.spawnParticle(p.x, p.y, p.color, 24, 5.5, 42);
+    this.triggerShake(7, 14);
+  }
+
+  private step() {
+    if (this.countdownActive) {
+      this.countdownTimer--;
+      if (this.countdownTimer <= -25) this.countdownActive = false;
+    }
+
+    if (this.shakeDur > 0) {
+      this.shakeX = (Math.random() - 0.5) * this.shakeMag * 2;
+      this.shakeY = (Math.random() - 0.5) * this.shakeMag * 2;
+      this.shakeDur--;
+      this.shakeMag *= 0.9;
+    } else {
+      this.shakeX = 0;
+      this.shakeY = 0;
+    }
+
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.08;
+      if (--p.life <= 0) this.particles.splice(i, 1);
+    }
+    for (let i = this.popups.length - 1; i >= 0; i--) {
+      const pp = this.popups[i];
+      pp.y += pp.vy;
+      if (--pp.life <= 0) this.popups.splice(i, 1);
+    }
+
+    if (this.gameState !== 'playing' || (this.countdownActive && this.countdownTimer >= 0)) {
+      return;
+    }
+
+    // Update players
+    const isRace = this.currentMinigame === 'race';
+    const isDodge = this.currentMinigame === 'dodge';
+
+    if (!isRace) {
+      for (const p of this.players) {
+        if (!p.alive) continue;
+        const inp = inputPlayers[p.index];
+
+        if (isDodge) {
+          p.vx += inp.x * 2.2;
+          const wantJ = inp.jump || inp.y < -0.42;
+          if (wantJ && p.onGround) {
+            p.vy = -8.8;
+            p.onGround = false;
+            PartyAudio.play('jump');
+          }
+          p.vy += 0.44;
+          p.vx *= 0.86;
+          p.x += p.vx;
+          p.y += p.vy;
+          if (p.y + p.radius >= this.ch - 20) {
+            p.y = this.ch - 20 - p.radius;
+            p.vy = 0;
+            p.onGround = true;
+          }
+          p.x = Math.max(p.radius, Math.min(this.cw - p.radius, p.x));
+        } else {
+          p.vx += inp.x * 1.35;
+          p.vy += inp.y * 1.35;
+          p.vx *= 0.88;
+          p.vy *= 0.88;
+          p.x += p.vx;
+          p.y += p.vy;
+        }
+
+        const aimX = inp.releaseAction ? inp.releaseX : inp.x;
+        const aimY = inp.releaseAction ? inp.releaseY : inp.y;
+        if (Math.abs(aimX) > 0.1 || Math.abs(aimY) > 0.1) {
+          p.angle = Math.atan2(aimY, aimX);
+        }
+
+        if (Math.hypot(p.vx, p.vy) > 2.2) {
+          p.trail.push({ x: p.x, y: p.y, life: 10 });
+          if (p.trail.length > 8) p.trail.shift();
+        }
+        p.trail = p.trail.filter((tr) => --tr.life > 0);
+
+        if (p.invincible > 0) p.invincible--;
+        if (p.attackTimer > 0 && --p.attackTimer <= 0) p.isAttacking = false;
+        if (p.dashCooldown > 0) p.dashCooldown--;
+
+        // Boundary rules
+        if (this.currentMinigame === 'sumo') {
+          const cx = this.cw / 2;
+          const cy = this.ch / 2;
+          const ringR = Math.min(this.cw, this.ch) * 0.36;
+          if (Math.hypot(p.x - cx, p.y - cy) > ringR) this.killPlayer(p);
+        } else if (this.currentMinigame === 'futbol') {
+          p.x = Math.max(p.radius, Math.min(this.cw - p.radius, p.x));
+          p.y = Math.max(p.radius + 42, Math.min(this.ch - p.radius, p.y));
+        } else if (!isDodge) {
+          p.x = Math.max(p.radius, Math.min(this.cw - p.radius, p.x));
+          p.y = Math.max(p.radius + 42, Math.min(this.ch - p.radius, p.y));
+        }
+      }
+    }
+
+    // Combat / dash in sumo, king, bomb
+    if (['sumo', 'king', 'bomb'].includes(this.currentMinigame)) {
+      for (let i = 0; i < this.players.length; i++) {
+        const p = this.players[i];
+        if (!p.alive) continue;
+        const inp = inputPlayers[i];
+        if ((inp.action || inp.releaseAction) && p.dashCooldown <= 0) {
+          p.vx += Math.cos(p.angle) * 12.5;
+          p.vy += Math.sin(p.angle) * 12.5;
+          p.dashCooldown = 36;
+          p.isAttacking = true;
+          p.attackTimer = 10;
+          this.spawnParticle(p.x, p.y, p.color, 6, 3.2, 16);
+          PartyAudio.play('jump');
+        }
+        for (let j = i + 1; j < this.players.length; j++) {
+          const o = this.players[j];
+          if (!o.alive) continue;
+          const dx = o.x - p.x;
+          const dy = o.y - p.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < p.radius + o.radius) {
+            const ang = Math.atan2(dy, dx);
+            const f1 = p.isAttacking ? 8.5 : 3.2;
+            const f2 = o.isAttacking ? 8.5 : 3.2;
+            o.vx += Math.cos(ang) * f1;
+            o.vy += Math.sin(ang) * f1;
+            p.vx -= Math.cos(ang) * f2;
+            p.vy -= Math.sin(ang) * f2;
+            PartyAudio.play('hit');
+          }
+        }
+      }
+    }
+
+    // Projectiles (snow)
+    for (let i = this.projectiles.length - 1; i >= 0; i--) {
+      const pr = this.projectiles[i];
+      pr.x += pr.vx;
+      pr.y += pr.vy;
+      pr.life--;
+      if (pr.x < 0 || pr.x > this.cw || pr.y < 0 || pr.y > this.ch || pr.life <= 0) {
+        this.projectiles.splice(i, 1);
+        continue;
+      }
+      for (const pl of this.players) {
+        if (!pl.alive || pl.index === pr.owner || pl.invincible > 0) continue;
+        if (Math.hypot(pl.x - pr.x, pl.y - pr.y) < pl.radius + 5) {
+          const ang = Math.atan2(pl.y - pr.y, pl.x - pr.x);
+          pl.vx += Math.cos(ang) * 7.5;
+          pl.vy += Math.sin(ang) * 7.5;
+          pl.invincible = 12;
+          const ow = this.players[pr.owner];
+          if (ow) {
+            ow.score++;
+            this.addPopup(pl.x, pl.y - 26, '+1', ow.color);
+          }
+          this.spawnParticle(pr.x, pr.y, '#e0f2fe', 9, 3.5, 16);
+          PartyAudio.play('hit');
+          this.projectiles.splice(i, 1);
+          break;
+        }
+      }
+    }
+
+    // Mode-specific simulation
+    switch (this.currentMinigame) {
+      case 'futbol':
+        this.updateFutbol();
+        break;
+      case 'coins':
+        this.updateCoins();
+        break;
+      case 'dodge':
+        this.updateDodge();
+        break;
+      case 'race':
+        this.updateRace();
+        break;
+      case 'king':
+        this.updateKing();
+        break;
+      case 'bomb':
+        this.updateBomb();
+        break;
+      case 'snow':
+        this.updateSnow();
+        break;
+    }
+
+    if (['sumo', 'dodge', 'bomb'].includes(this.currentMinigame)) {
+      const alive = this.players.filter((p) => p.alive);
+      if (alive.length <= 1) {
+        if (alive.length === 1) alive[0].score++;
+        this.endRound();
+      }
+    }
+
+    clearReleasedActions();
+    if (++this.hudTick % 6 === 0) this.emitHud();
+  }
+
+  private updateFutbol() {
+    const b = this.ball;
+    if (!b) return;
+    b.vx *= 0.98;
+    b.vy *= 0.98;
+    b.x += b.vx;
+    b.y += b.vy;
+    if (b.y - b.radius < 44) { b.y = 44 + b.radius; b.vy *= -0.82; }
+    if (b.y + b.radius > this.ch) { b.y = this.ch - b.radius; b.vy *= -0.82; }
+
+    const goalW = 18;
+    const goalH = this.ch * 0.34;
+    const goalTop = this.ch / 2 - goalH / 2;
+    const goalBot = this.ch / 2 + goalH / 2;
+
+    if (b.x - b.radius < goalW && b.y > goalTop && b.y < goalBot) {
+      this.players[1].score++;
+      if (this.players[3]) this.players[3].score++;
+      this.spawnParticle(b.x, b.y, '#ef4444', 24, 5.5, 32);
+      this.addPopup(this.cw / 2, this.ch / 2 - 40, 'GOL!', '#ef4444');
+      PartyAudio.play('coin');
+      b.x = this.cw / 2; b.y = this.ch / 2; b.vx = 0; b.vy = 0;
+      if (this.players.some((p) => p.score - p.roundStart >= 3)) this.endRound();
+      return;
+    }
+    if (b.x + b.radius > this.cw - goalW && b.y > goalTop && b.y < goalBot) {
+      this.players[0].score++;
+      if (this.players[2]) this.players[2].score++;
+      this.spawnParticle(b.x, b.y, '#3b82f6', 24, 5.5, 32);
+      this.addPopup(this.cw / 2, this.ch / 2 - 40, 'GOL!', '#3b82f6');
+      PartyAudio.play('coin');
+      b.x = this.cw / 2; b.y = this.ch / 2; b.vx = 0; b.vy = 0;
+      if (this.players.some((p) => p.score - p.roundStart >= 3)) this.endRound();
+      return;
+    }
+
+    if (b.x - b.radius < goalW && (b.y < goalTop || b.y > goalBot)) { b.x = goalW + b.radius; b.vx *= -0.82; }
+    if (b.x + b.radius > this.cw - goalW && (b.y < goalTop || b.y > goalBot)) { b.x = this.cw - goalW - b.radius; b.vx *= -0.82; }
+
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      const dx = b.x - p.x;
+      const dy = b.y - p.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < p.radius + b.radius) {
+        const ang = Math.atan2(dy, dx);
+        const inp = inputPlayers[p.index];
+        const kick = inp.action || inp.releaseAction ? 11.5 : 4.5;
+        b.vx = Math.cos(ang) * kick;
+        b.vy = Math.sin(ang) * kick;
+        b.lastKicker = p.index;
+        b.x = p.x + Math.cos(ang) * (p.radius + b.radius + 1);
+        b.y = p.y + Math.sin(ang) * (p.radius + b.radius + 1);
+        this.spawnParticle(b.x, b.y, '#ffffff', 4, 2.2, 12);
+        PartyAudio.play('hit');
+      }
+    }
+  }
+
+  private updateCoins() {
+    this.gameTimer--;
+    if (++this.coinSpawnTimer >= 55 && this.coins.length < 10) {
+      this.coinSpawnTimer = 0;
+      const diamond = Math.random() < 0.2;
+      this.coins.push({
+        x: 48 + Math.random() * (this.cw - 96),
+        y: 68 + Math.random() * (this.ch - 110),
+        radius: diamond ? 13 : 11,
+        life: 540,
+        diamond,
+      });
+    }
+    for (let i = this.coins.length - 1; i >= 0; i--) {
+      const c = this.coins[i];
+      if (--c.life <= 0) {
+        this.coins.splice(i, 1);
+        continue;
+      }
+      for (const p of this.players) {
+        if (!p.alive) continue;
+        if (Math.hypot(p.x - c.x, p.y - c.y) < p.radius + c.radius) {
+          const val = c.diamond ? 3 : 1;
+          p.coins += val;
+          p.score = p.roundStart + p.coins;
+          this.spawnParticle(c.x, c.y, c.diamond ? '#38bdf8' : '#fbbf24', 10, 3.5, 18);
+          this.addPopup(c.x, c.y - 14, `+${val}`, c.diamond ? '#38bdf8' : '#fbbf24');
+          PartyAudio.play('coin');
+          this.coins.splice(i, 1);
+          break;
+        }
+      }
+    }
+    if (this.gameTimer <= 0) this.endRound();
+  }
+
+  private updateDodge() {
+    this.dodgeSpawnTimer++;
+    this.dodgeSpeed += 0.0014;
+    if (this.dodgeSpawnTimer >= Math.max(9, 36 - Math.floor(this.dodgeSpeed * 2.8))) {
+      this.dodgeSpawnTimer = 0;
+      this.fallingObjects.push({
+        x: 26 + Math.random() * (this.cw - 52),
+        y: -22,
+        vy: this.dodgeSpeed + Math.random() * 1.4,
+        radius: 11 + Math.random() * 11,
+        color: `hsl(${Math.random() * 48}, 90%, 55%)`,
+      });
+    }
+    for (let i = this.fallingObjects.length - 1; i >= 0; i--) {
+      const f = this.fallingObjects[i];
+      f.y += f.vy;
+      if (f.y > this.ch + 28) {
+        this.fallingObjects.splice(i, 1);
+        continue;
+      }
+      for (const p of this.players) {
+        if (!p.alive || p.invincible > 0) continue;
+        if (Math.hypot(p.x - f.x, p.y - f.y) < p.radius + f.radius) {
+          p.hp -= 35;
+          p.invincible = 32;
+          this.spawnParticle(f.x, f.y, f.color, 10, 4.5, 18);
+          this.triggerShake(5, 9);
+          PartyAudio.play('hit');
+          this.fallingObjects.splice(i, 1);
+          if (p.hp <= 0) this.killPlayer(p);
+          break;
+        }
+      }
+    }
+  }
+
+  private updateRace() {
+    let maxX = 0;
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      const inp = inputPlayers[p.index];
+      const spd = (inp.x > 0.1 ? 3.5 : 0) + (inp.x > 0.55 ? 2.4 : 0);
+      p.raceX = Math.max(0, p.raceX + spd);
+
+      const wantJ = inp.jump || inp.y < -0.42;
+      if (p.onGround && wantJ) {
+        p.vy = -10.5;
+        p.onGround = false;
+        p.jumpsLeft = 1;
+        p.jh = true;
+        PartyAudio.play('jump');
+      } else if (!p.onGround && wantJ && !p.jh && p.jumpsLeft > 0) {
+        p.vy = -9.2;
+        p.jumpsLeft--;
+        p.jh = true;
+        this.spawnParticle(p.x, p.y + 20, '#ffffff', 4, 2, 12);
+        PartyAudio.play('jump');
+      }
+      if (!wantJ) p.jh = false;
+
+      p.vy += 0.45;
+      p.y += p.vy;
+      p.onGround = false;
+      if (p.y + p.radius >= this.ch - 20) {
+        p.y = this.ch - 20 - p.radius;
+        p.vy = 0;
+        p.onGround = true;
+        p.jumpsLeft = 2;
+      }
+
+      for (const obs of this.raceObstacles) {
+        if (p.raceX + p.radius > obs.x && p.raceX - p.radius < obs.x + obs.w && p.y + p.radius > obs.y) {
+          if (p.vy > 0 && p.y + p.radius - p.vy <= obs.y + 8) {
+            p.y = obs.y - p.radius;
+            p.vy = 0;
+            p.onGround = true;
+            p.jumpsLeft = 2;
+          } else {
+            p.raceX = obs.x - p.radius;
+          }
+        }
+      }
+
+      if (p.raceX > maxX) maxX = p.raceX;
+      if (p.raceX >= this.raceFinishX) {
+        p.score++;
+        this.addPopup(p.x, p.y - 30, 'FİNİŞ!', '#4ade80');
+        PartyAudio.play('coin');
+        this.endRound();
+        return;
+      }
+    }
+    this.raceOffset = Math.max(0, maxX - this.cw * 0.34);
+    for (const p of this.players) p.x = p.raceX - this.raceOffset + 60;
+  }
+
+  private updateKing() {
+    this.gameTimer--;
+    const cx = this.cw / 2;
+    const cy = this.ch / 2;
+    const zoneR = Math.min(this.cw, this.ch) * 0.2;
+    let inside = -1;
+    let count = 0;
+    for (const p of this.players) {
+      if (p.alive && Math.hypot(p.x - cx, p.y - cy) < zoneR) {
+        count++;
+        inside = p.index;
+      }
+    }
+    if (count === 1) {
+      const p = this.players[inside];
+      if (++p.kingTicks % 24 === 0) {
+        p.score++;
+        this.spawnParticle(p.x, p.y - 34, '#fbbf24', 5, 2.2, 18);
+        this.addPopup(p.x, p.y - 38, '+1', '#fbbf24');
+        PartyAudio.play('coin');
+      }
+    }
+    if (this.gameTimer <= 0) this.endRound();
+  }
+
+  private updateBomb() {
+    const b = this.ball;
+    if (!b) return;
+    if (b.noPick > 0) b.noPick--;
+
+    if (b.holder >= 0 && this.players[b.holder]?.alive) {
+      const h = this.players[b.holder];
+      b.x = h.x;
+      b.y = h.y - h.radius - 13;
+      b.fuse--;
+      if (h.throwCd > 0) h.throwCd--;
+      const inp = inputPlayers[h.index];
+      if ((inp.action || inp.releaseAction) && h.throwCd <= 0) {
+        h.throwCd = 24;
+        b.holder = -1;
+        b.lastKicker = h.index;
+        b.noPick = 24;
+        b.vx = Math.cos(h.angle) * 10;
+        b.vy = Math.sin(h.angle) * 10;
+        PartyAudio.play('shot');
+      } else if (b.fuse <= 0) {
+        this.explodeHotBomb(b.x, b.y);
+      }
+    } else {
+      b.holder = -1;
+      b.vx *= 0.94;
+      b.vy *= 0.94;
+      b.x += b.vx;
+      b.y += b.vy;
+      if (b.x < 20 || b.x > this.cw - 20) { b.vx *= -0.75; b.x = Math.max(20, Math.min(this.cw - 20, b.x)); }
+      if (b.y < 52 || b.y > this.ch - 20) { b.vy *= -0.75; b.y = Math.max(52, Math.min(this.ch - 20, b.y)); }
+      b.fuse--;
+      if (b.fuse <= 0) {
+        this.explodeHotBomb(b.x, b.y);
+        return;
+      }
+      for (const p of this.players) {
+        if (!p.alive) continue;
+        if (p.index === b.lastKicker && b.noPick > 0) continue;
+        if (Math.hypot(p.x - b.x, p.y - b.y) < p.radius + b.radius) {
+          b.holder = p.index;
+          b.lastKicker = p.index;
+          b.vx = 0;
+          b.vy = 0;
+          this.spawnParticle(p.x, p.y - 20, '#f97316', 7, 3, 14);
+          PartyAudio.play('hit');
+          break;
+        }
+      }
+    }
+  }
+
+  private explodeHotBomb(bx: number, by: number) {
+    PartyAudio.play('boom');
+    this.spawnParticle(bx, by, '#f97316', 32, 6.5, 32);
+    this.spawnParticle(bx, by, '#fbbf24', 18, 4.5, 26);
+    this.triggerShake(11, 16);
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      if (Math.hypot(p.x - bx, p.y - by) < 88) {
+        p.hp = 0;
+        this.killPlayer(p);
+      }
+    }
+    if (this.ball) {
+      this.ball.holder = -1;
+      this.ball.lastKicker = -1;
+      this.ball.fuse = 6 * 60;
+      this.ball.x = this.cw / 2;
+      this.ball.y = this.ch / 2;
+      this.ball.vx = 0;
+      this.ball.vy = 0;
+    }
+  }
+
+  private updateSnow() {
+    this.gameTimer--;
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      if (p.snowCd > 0) p.snowCd--;
+      const inp = inputPlayers[p.index];
+      if ((inp.action || inp.releaseAction) && p.snowCd <= 0) {
+        p.snowCd = 20;
+        this.projectiles.push({
+          x: p.x + Math.cos(p.angle) * 20,
+          y: p.y - 10 + Math.sin(p.angle) * 20,
+          vx: Math.cos(p.angle) * 8.5,
+          vy: Math.sin(p.angle) * 8.5,
+          owner: p.index,
+          life: 90,
+          snow: true,
+        });
+        PartyAudio.play('shot');
+      }
+    }
+    if (this.gameTimer <= 0) this.endRound();
+  }
+
+  private drawVectorCrown(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.fillStyle = '#fbbf24';
+    ctx.strokeStyle = '#92400e';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(-size, size * 0.6);
+    ctx.lineTo(-size * 1.1, -size * 0.5);
+    ctx.lineTo(-size * 0.45, size * 0.05);
+    ctx.lineTo(0, -size * 0.85);
+    ctx.lineTo(size * 0.45, size * 0.05);
+    ctx.lineTo(size * 1.1, -size * 0.5);
+    ctx.lineTo(size, size * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private drawMiniHeader(ctx: CanvasRenderingContext2D, text: string, ratio?: number) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(9,9,11,0.82)';
+    roundRectPath(ctx, this.cw / 2 - 58, 10, 116, 26, 6);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#f4f4f5';
+    ctx.font = '700 13px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, this.cw / 2, 23);
+    if (ratio !== undefined) {
+      const bw = Math.min(280, this.cw * 0.36);
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.fillRect(this.cw / 2 - bw / 2, 40, bw, 4);
+      ctx.fillStyle = ratio > 0.25 ? '#f4f4f5' : '#ef4444';
+      ctx.fillRect(this.cw / 2 - bw / 2, 40, bw * Math.max(0, Math.min(1, ratio)), 4);
+    }
+    ctx.restore();
+  }
+
+  private drawMap(ctx: CanvasRenderingContext2D) {
+    const cw = this.cw;
+    const ch = this.ch;
+    const nowT = Date.now() * 0.002;
+
+    if (this.currentMinigame === 'sumo') {
+      const cx = cw / 2;
+      const cy = ch / 2;
+      const r = Math.min(cw, ch) * 0.36;
+      const g = ctx.createRadialGradient(cx, cy, r * 0.2, cx, cy, Math.max(cw, ch) * 0.75);
+      g.addColorStop(0, '#272017');
+      g.addColorStop(1, '#09090b');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cw, ch);
+
+      ctx.save();
+      ctx.shadowColor = '#f59e0b';
+      ctx.shadowBlur = 28;
+      const rg = ctx.createRadialGradient(cx, cy - r * 0.2, r * 0.1, cx, cy, r);
+      rg.addColorStop(0, '#4a3520');
+      rg.addColorStop(1, '#291c10');
+      ctx.fillStyle = rg;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 5;
+      ctx.setLineDash([16, 9]);
+      ctx.lineDashOffset = -nowT * 14;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.5, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (this.currentMinigame === 'futbol') {
+      ctx.fillStyle = '#09090b';
+      ctx.fillRect(0, 0, cw, ch);
+      const g = ctx.createLinearGradient(0, 44, 0, ch);
+      g.addColorStop(0, '#166534');
+      g.addColorStop(1, '#0c4321');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 44, cw, ch - 44);
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      for (let x = 0; x < cw; x += 80) ctx.fillRect(x, 44, 40, ch - 44);
+      ctx.strokeStyle = 'rgba(255,255,255,0.38)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(10, 52, cw - 20, ch - 60);
+      ctx.beginPath();
+      ctx.moveTo(cw / 2, 52);
+      ctx.lineTo(cw / 2, ch - 8);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cw / 2, (ch + 44) / 2, 58, 0, Math.PI * 2);
+      ctx.stroke();
+
+      const goalH = ch * 0.34;
+      const goalTop = ch / 2 - goalH / 2;
+      for (const side of [0, 1]) {
+        const gx = side ? cw - 18 : 0;
+        const col = side ? '#ef4444' : '#3b82f6';
+        ctx.fillStyle = side ? 'rgba(239,68,68,0.25)' : 'rgba(59,130,246,0.25)';
+        ctx.fillRect(gx, goalTop, 18, goalH);
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(gx, goalTop, 18, goalH);
+      }
+
+      const s1 = this.players[0]?.score || 0;
+      const s2 = this.players[1]?.score || 0;
+      this.drawMiniHeader(ctx, `${s1}  :  ${s2}`);
+
+      if (this.ball) {
+        const b = this.ball;
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        ctx.ellipse(b.x, b.y + b.radius + 3, b.radius * 0.9, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.save();
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.translate(b.x, b.y);
+        ctx.rotate((b.x + b.y) * 0.05);
+        ctx.fillStyle = '#18181b';
+        ctx.beginPath();
+        ctx.arc(0, 0, b.radius * 0.42, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    } else if (this.currentMinigame === 'coins') {
+      const g = ctx.createRadialGradient(cw / 2, ch / 2, 40, cw / 2, ch / 2, Math.max(cw, ch) * 0.7);
+      g.addColorStop(0, '#18181b');
+      g.addColorStop(1, '#09090b');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.lineWidth = 1;
+      for (let gx = 0; gx < cw; gx += 52) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, ch); ctx.stroke(); }
+      for (let gy = 0; gy < ch; gy += 52) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(cw, gy); ctx.stroke(); }
+      this.drawMiniHeader(ctx, `${Math.max(0, Math.ceil(this.gameTimer / 60))}s`, this.gameTimer / (this.gameTimerMax || 1));
+
+      for (const c of this.coins) {
+        const flash = 0.85 + Math.sin(Date.now() * 0.01 + c.x) * 0.15;
+        ctx.save();
+        ctx.shadowColor = c.diamond ? '#38bdf8' : '#fbbf24';
+        ctx.shadowBlur = 14;
+        ctx.fillStyle = c.diamond ? `rgba(56,189,248,${flash})` : `rgba(251,191,36,${flash})`;
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, c.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = c.diamond ? '#0284c7' : '#92400e';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = '#09090b';
+        ctx.font = '800 8px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(c.diamond ? '+3' : '+1', c.x, c.y + 0.5);
+        ctx.restore();
+      }
+    } else if (this.currentMinigame === 'dodge') {
+      const g = ctx.createLinearGradient(0, 0, 0, ch);
+      g.addColorStop(0, '#09090b');
+      g.addColorStop(1, '#1c1218');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.fillStyle = '#18181b';
+      ctx.fillRect(0, ch - 20, cw, 20);
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(0, ch - 20, cw, 4);
+
+      for (const f of this.fallingObjects) {
+        ctx.fillStyle = 'rgba(239,68,68,0.22)';
+        ctx.beginPath();
+        ctx.ellipse(f.x, ch - 20, f.radius * 0.9, 3.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(249,115,22,0.45)';
+        ctx.beginPath();
+        ctx.moveTo(f.x - f.radius * 0.5, f.y);
+        ctx.lineTo(f.x, f.y - f.radius * 3.5);
+        ctx.lineTo(f.x + f.radius * 0.5, f.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.save();
+        ctx.shadowColor = f.color;
+        ctx.shadowBlur = 14;
+        ctx.fillStyle = f.color;
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, f.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    } else if (this.currentMinigame === 'race') {
+      const g = ctx.createLinearGradient(0, 0, 0, ch);
+      g.addColorStop(0, '#09090b');
+      g.addColorStop(0.65, '#1e1b2e');
+      g.addColorStop(1, '#31253a');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.fillStyle = '#18181b';
+      ctx.fillRect(0, ch - 20, cw, 20);
+      ctx.strokeStyle = 'rgba(255,255,255,0.24)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([18, 14]);
+      ctx.lineDashOffset = this.raceOffset;
+      ctx.beginPath();
+      ctx.moveTo(0, ch - 10);
+      ctx.lineTo(cw, ch - 10);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      for (const obs of this.raceObstacles) {
+        const sx = obs.x - this.raceOffset;
+        if (sx < -60 || sx > cw + 60) continue;
+        const h = ch - 20 - obs.y;
+        ctx.fillStyle = '#3f3f46';
+        ctx.fillRect(sx, obs.y, obs.w, h);
+        ctx.strokeStyle = '#f4f4f5';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(sx, obs.y, obs.w, h);
+      }
+
+      const fsx = this.raceFinishX - this.raceOffset;
+      if (fsx > -20 && fsx < cw + 20) {
+        for (let y = 0; y < ch - 20; y += 12) {
+          ctx.fillStyle = (y / 12) % 2 === 0 ? '#fff' : '#111';
+          ctx.fillRect(fsx, y, 6, 12);
+          ctx.fillStyle = (y / 12) % 2 === 0 ? '#111' : '#fff';
+          ctx.fillRect(fsx + 6, y, 6, 12);
+        }
+        ctx.fillStyle = '#f4f4f5';
+        ctx.font = '800 16px "Barlow Condensed", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('FİNİŞ', fsx + 6, 26);
+      }
+
+      for (const p of this.players) {
+        if (!p.alive) continue;
+        const prog = Math.max(0, Math.min(1, p.raceX / (this.raceFinishX || 1)));
+        const y = 12 + p.index * 13;
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.fillRect(14, y, cw - 28, 7);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(14, y, (cw - 28) * prog, 7);
+      }
+    } else if (this.currentMinigame === 'king') {
+      const cx = cw / 2;
+      const cy = ch / 2;
+      const zoneR = Math.min(cw, ch) * 0.2;
+      const g = ctx.createRadialGradient(cx, cy, 20, cx, cy, Math.max(cw, ch) * 0.75);
+      g.addColorStop(0, '#231f10');
+      g.addColorStop(1, '#09090b');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cw, ch);
+
+      const holder = this.players.find((p) => p.alive && Math.hypot(p.x - cx, p.y - cy) < zoneR);
+      const zc = holder ? holder.color : '#fbbf24';
+      ctx.save();
+      ctx.shadowColor = zc;
+      ctx.shadowBlur = 24;
+      ctx.fillStyle = 'rgba(251,191,36,0.12)';
+      ctx.beginPath();
+      ctx.arc(cx, cy, zoneR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = zc;
+      ctx.lineWidth = 3;
+      ctx.setLineDash([12, 8]);
+      ctx.lineDashOffset = -nowT * 14;
+      ctx.stroke();
+      ctx.restore();
+
+      this.drawVectorCrown(ctx, cx, cy, 18);
+      this.drawMiniHeader(ctx, `${Math.max(0, Math.ceil(this.gameTimer / 60))}s`, this.gameTimer / (this.gameTimerMax || 1));
+    } else if (this.currentMinigame === 'bomb') {
+      const g = ctx.createRadialGradient(cw / 2, ch / 2, 40, cw / 2, ch / 2, Math.max(cw, ch) * 0.75);
+      g.addColorStop(0, '#241214');
+      g.addColorStop(1, '#09090b');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cw, ch);
+
+      if (this.ball) {
+        const b = this.ball;
+        if (b.fuse < 120) {
+          ctx.fillStyle = `rgba(239,68,68,${0.08 + 0.05 * Math.sin(nowT * 10)})`;
+          ctx.fillRect(0, 0, cw, ch);
+        }
+        ctx.save();
+        ctx.shadowColor = b.fuse < 120 ? '#ef4444' : '#f97316';
+        ctx.shadowBlur = 18;
+        ctx.fillStyle = '#18181b';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 13, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        ctx.strokeStyle = b.fuse < 120 ? '#ef4444' : '#fbbf24';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 19, -Math.PI / 2, -Math.PI / 2 + Math.max(0, b.fuse / 360) * Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '700 12px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${Math.max(0, Math.ceil(b.fuse / 60))}s`, b.x, b.y - 26);
+      }
+    } else if (this.currentMinigame === 'snow') {
+      const g = ctx.createLinearGradient(0, 0, 0, ch);
+      g.addColorStop(0, '#0c1829');
+      g.addColorStop(1, '#162f4a');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.strokeStyle = 'rgba(186,230,253,0.32)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cw / 2, ch / 2, Math.min(cw, ch) * 0.3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = '#e2e8f0';
+      ctx.fillRect(0, ch - 14, cw, 14);
+      this.drawMiniHeader(ctx, `${Math.max(0, Math.ceil(this.gameTimer / 60))}s`, this.gameTimer / (this.gameTimerMax || 1));
+    }
+  }
+
+  private drawStickman(ctx: CanvasRenderingContext2D, p: MiniPlayer) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    if (p.isAttacking) {
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = 18;
+    }
+    if (p.trail.length > 0) {
+      ctx.globalAlpha = 0.16;
+      for (const tr of p.trail) {
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(tr.x - p.x, tr.y - p.y, 10, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    const faceDir = Math.cos(p.angle) >= 0 ? 1 : -1;
+    const look = PartyEconomy.look(p.index);
+
+    // Legs
+    const walkPhase = Date.now() * 0.008;
+    const legSwing = Math.abs(p.vx) > 0.5 || Math.abs(p.vy) > 0.5 ? Math.sin(walkPhase) * 6 : 0;
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 4.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-1.5, 8); ctx.lineTo(-5 + legSwing, 22);
+    ctx.moveTo(1.5, 8); ctx.lineTo(5 - legSwing, 22);
+    ctx.stroke();
+
+    // Torso
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.moveTo(-4, -11); ctx.lineTo(4, -11); ctx.lineTo(2.5, 8); ctx.lineTo(-2.5, 8);
+    ctx.closePath();
+    ctx.fill();
+    PartyEconomy.drawOutfit(ctx, look.outfit, 0, 8, 0, -11, 8);
+
+    // Helmet
+    const headGlow = ctx.createLinearGradient(-8, -29, 8, -12);
+    headGlow.addColorStop(0, '#ffffff');
+    headGlow.addColorStop(0.24, p.color);
+    headGlow.addColorStop(1, '#091326');
+    ctx.beginPath();
+    ctx.ellipse(0, -20, 9.2, 9.5, 0, 0, Math.PI * 2);
+    ctx.fillStyle = headGlow;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(3,9,23,0.92)';
+    ctx.beginPath();
+    ctx.ellipse(faceDir * 0.7, -20.2, 7.4, 4.6, faceDir * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#c5f7ff';
+    for (const ex of [-2.6, 2.1]) {
+      ctx.fillRect(ex - 0.8, -21, 2.2, 1.5);
+    }
+
+    PartyEconomy.drawHeadgear(ctx, look, 0, -20, 1, faceDir);
+
+    // Name tag + HP
+    const ext = PartyEconomy.headTop(look, 10);
+    const barY = -22 - ext - 10;
+    if (p.hp <= 100) {
+      const ratio = Math.max(0, Math.min(1, p.hp / 100));
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(-16, barY, 32, 4);
+      ctx.fillStyle = ratio > 0.4 ? '#4ade80' : '#f87171';
+      ctx.fillRect(-16, barY, 32 * ratio, 4);
+    }
+    ctx.fillStyle = '#f4f4f5';
+    ctx.font = '700 10px "Plus Jakarta Sans", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(PLAYER_NAMES[p.index] || `P${p.index + 1}`, 0, barY - 5);
+
+    ctx.restore();
+  }
+
+  private draw() {
+    if (!this.canvas || !this.ctx) return;
+    const ctx = this.ctx;
+    const cw = this.cw;
+    const ch = this.ch;
+
+    ctx.save();
+    ctx.translate(this.shakeX, this.shakeY);
+    this.drawMap(ctx);
+
+    for (const pr of this.projectiles) {
+      ctx.save();
+      ctx.shadowColor = '#bae6fd';
+      ctx.shadowBlur = 10;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(pr.x, pr.y, 5.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      if (p.invincible > 0 && Math.floor(p.invincible / 3) % 2 === 0) continue;
+      this.drawStickman(ctx, p);
+    }
+
+    for (const pt of this.particles) {
+      const a = pt.life / pt.maxLife;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = pt.color;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, pt.radius * a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for (const pp of this.popups) {
+      ctx.globalAlpha = Math.min(1, pp.life / 18);
+      ctx.fillStyle = pp.color;
+      ctx.font = '800 15px "Barlow Condensed", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(pp.text, pp.x, pp.y);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    ctx.fillStyle = 'rgba(244,244,245,0.55)';
+    ctx.font = '700 12px "Plus Jakarta Sans", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Raund ${this.currentRound}/${this.maxRounds}`, cw / 2, ch - 8);
+
+    if (this.countdownActive) {
+      const sec = Math.ceil(this.countdownTimer / 60);
+      const text = sec > 0 ? String(sec) : 'BAŞLA!';
+      ctx.fillStyle = 'rgba(9,9,11,0.38)';
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.fillStyle = sec > 0 ? '#ffffff' : '#4ade80';
+      ctx.font = '800 78px "Barlow Condensed", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, cw / 2, ch / 2);
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    if (this.gameState === 'roundEnd') {
+      ctx.fillStyle = 'rgba(9,9,11,0.55)';
+      ctx.fillRect(0, 0, cw, ch);
+      const alive = this.players.filter((p) => p.alive);
+      ctx.font = '800 48px "Barlow Condensed", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      if (alive.length === 1) {
+        ctx.fillStyle = alive[0].color;
+        ctx.fillText(`${PLAYER_NAMES[alive[0].index] || `P${alive[0].index + 1}`} Qazandı!`, cw / 2, ch / 2);
+      } else {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('Raund Bitdi!', cw / 2, ch / 2);
+      }
+      ctx.textBaseline = 'alphabetic';
+    }
+  }
+
+  private loop = (now: number) => {
+    if (!this.on || !this.canvas) return;
+    this.raf = requestAnimationFrame(this.loop);
+
+    if (this.canvas.width !== this.canvas.clientWidth || this.canvas.height !== this.canvas.clientHeight) {
+      this.canvas.width = this.canvas.clientWidth;
+      this.canvas.height = this.canvas.clientHeight;
+      this.cw = this.canvas.width;
+      this.ch = this.canvas.height;
+    }
+
+    pollKeyboard(this.netRole !== null);
+    if (this.paused) {
+      this.acc = 0;
+      return;
+    }
+
+    if (!this.last) this.last = now;
+    this.acc += now - this.last;
+    this.last = now;
+    const STEP = 1000 / 60;
+    let n = 0;
+    if (this.netRole !== 'guest') {
+      while (this.acc >= STEP && n < 4) {
+        this.step();
+        this.acc -= STEP;
+        n++;
+      }
+    } else {
+      this.acc = 0;
+    }
+    if (this.acc > STEP * 4) this.acc = 0;
+
+    this.draw();
+    if (this.netRole && this.callbacks?.onSendNet) {
+      this.callbacks.onSendNet();
+    }
+  };
+}
+
+export const minigameEngine = new MinigameEngine();
