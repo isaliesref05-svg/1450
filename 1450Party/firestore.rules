@@ -1,0 +1,132 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidEquippedSlot(slot) {
+      return slot is map
+        && slot.keys().hasAll(['outfit', 'hat', 'accessory'])
+        && slot.keys().hasOnly(['outfit', 'hat', 'accessory'])
+        && slot.outfit is string && slot.outfit.size() >= 1 && slot.outfit.size() <= 32
+        && (slot.hat == null || (slot.hat is string && slot.hat.size() <= 32))
+        && (slot.accessory == null || (slot.accessory is string && slot.accessory.size() <= 32));
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'name', 'coins', 'matches', 'owned', 'equipped', 'colors',
+          'muted', 'volume', 'musicVolume', 'musicMuted', 'battleVolume',
+          'battleMuted', 'shakeEnabled', 'joystickSize', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'name', 'email', 'photoURL', 'coins', 'matches', 'owned',
+          'equipped', 'colors', 'muted', 'volume', 'musicVolume', 'musicMuted',
+          'battleVolume', 'battleMuted', 'shakeEnabled', 'joystickSize',
+          'createdAt', 'updatedAt'
+        ])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128
+        && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.uid == request.auth.uid && data.uid == userId
+        && data.name is string && data.name.size() <= 32
+        && (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 160))
+        && (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 512))
+        && data.coins is int && data.coins >= 0 && data.coins <= 10000000
+        && data.matches is int && data.matches >= 0 && data.matches <= 1000000
+        && data.owned is list && data.owned.size() >= 1 && data.owned.size() <= 100
+        && data.owned[0] is string && data.owned[0].size() <= 32
+        && data.colors is list && data.colors.size() == 4
+        && data.colors[0] is string && data.colors[0].size() <= 16
+        && data.equipped is map
+        && data.equipped.keys().hasAll(['0', '1', '2', '3'])
+        && data.equipped.keys().hasOnly(['0', '1', '2', '3'])
+        && isValidEquippedSlot(data.equipped['0'])
+        && isValidEquippedSlot(data.equipped['1'])
+        && isValidEquippedSlot(data.equipped['2'])
+        && isValidEquippedSlot(data.equipped['3'])
+        && data.muted is bool
+        && data.musicMuted is bool
+        && data.battleMuted is bool
+        && data.shakeEnabled is bool
+        && data.volume is number && data.volume >= 0 && data.volume <= 1
+        && data.musicVolume is number && data.musicVolume >= 0 && data.musicVolume <= 1
+        && data.battleVolume is number && data.battleVolume >= 0 && data.battleVolume <= 1
+        && data.joystickSize in ['small', 'normal', 'large']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUsernameClaim(data) {
+      return data.keys().hasAll(['uid', 'name', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'name', 'updatedAt'])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128
+        && data.uid == request.auth.uid
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 32
+        && data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'email', 'photoURL', 'coins', 'matches', 'owned',
+          'equipped', 'colors', 'muted', 'volume', 'musicVolume',
+          'musicMuted', 'battleVolume', 'battleMuted', 'shakeEnabled',
+          'joystickSize', 'updatedAt'
+        ]);
+      allow delete: if isValidId(userId) && isOwner(userId);
+    }
+
+    match /usernames/{nameKey} {
+      allow get: if isValidId(nameKey);
+      allow list: if false;
+      allow create: if isValidId(nameKey)
+        && isSignedIn()
+        && isValidUsernameClaim(incoming())
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(nameKey)
+        && isSignedIn()
+        && existing().uid == request.auth.uid
+        && isValidUsernameClaim(incoming())
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'updatedAt']);
+      allow delete: if isValidId(nameKey)
+        && isSignedIn()
+        && existing().uid == request.auth.uid;
+    }
+  }
+}

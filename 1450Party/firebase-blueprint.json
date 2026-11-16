@@ -1,0 +1,156 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Synced player profile, currency, unlocked wardrobe items, equipped skins, colors, and game settings for 1450 Party.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication user UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Unique display nickname in game arenas",
+          "maxLength": 32
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified Google account email",
+          "maxLength": 160
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Google account avatar URL",
+          "maxLength": 512
+        },
+        "coins": {
+          "type": "number",
+          "description": "Player coin balance"
+        },
+        "matches": {
+          "type": "number",
+          "description": "Total completed matches count"
+        },
+        "owned": {
+          "type": "array",
+          "description": "List of owned shop item IDs"
+        },
+        "equipped": {
+          "type": "object",
+          "description": "Equipped outfit, hat, and accessory IDs per player slot (0-3)"
+        },
+        "colors": {
+          "type": "array",
+          "description": "4 hex color strings for P1-P4"
+        },
+        "muted": {
+          "type": "boolean",
+          "description": "SFX mute state"
+        },
+        "volume": {
+          "type": "number",
+          "description": "SFX volume (0 to 1)"
+        },
+        "musicVolume": {
+          "type": "number",
+          "description": "Menu music volume (0 to 1)"
+        },
+        "musicMuted": {
+          "type": "boolean",
+          "description": "Menu music mute state"
+        },
+        "battleVolume": {
+          "type": "number",
+          "description": "Battle music volume (0 to 1)"
+        },
+        "battleMuted": {
+          "type": "boolean",
+          "description": "Battle music mute state"
+        },
+        "shakeEnabled": {
+          "type": "boolean",
+          "description": "Screen shake enabled flag"
+        },
+        "joystickSize": {
+          "type": "string",
+          "enum": ["small", "normal", "large"],
+          "description": "Touchscreen joystick size preference"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp"
+        }
+      },
+      "required": [
+        "uid",
+        "name",
+        "coins",
+        "matches",
+        "owned",
+        "equipped",
+        "colors",
+        "muted",
+        "volume",
+        "musicVolume",
+        "musicMuted",
+        "battleVolume",
+        "battleMuted",
+        "shakeEnabled",
+        "joystickSize",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Unique global player nickname reservation entry keyed by normalized hex ID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Reserved player display name",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server reservation timestamp"
+        }
+      },
+      "required": ["uid", "name", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Private per-user game profile, shop inventory, and settings document."
+    },
+    "/usernames/{nameKey}": {
+      "schema": {
+        "$ref": "#/entities/UsernameClaim"
+      },
+      "description": "Global unique nickname registry preventing duplicate player names."
+    }
+  }
+}
